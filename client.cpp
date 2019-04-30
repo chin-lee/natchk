@@ -119,6 +119,7 @@ int main(int argc, char* argv[]) {
             udpSend(udphandle, ep.addr(), buf, sizeof(buf));
         }
     });
+    handler.shutdown();
 
     t.join();
     uv_loop_close(&mainloop);

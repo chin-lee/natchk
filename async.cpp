@@ -59,6 +59,8 @@ public:
             if (uv_is_active((uv_handle_t*)&m_asyncHandle)) {
                 uv_close((uv_handle_t*)&m_asyncHandle, handleClose);
                 m_shutdownHandler = std::move(hlr);
+            } else {
+                hlr();
             }
         });
     }
@@ -115,5 +117,9 @@ bool AsyncHandler::shutdown(ShutdownHandlerType&& handler) {
 }
 
 bool AsyncHandler::shutdown() {
-    return m_impl.shutdown();
+    bool retval = m_impl.shutdown();
+    if (retval) {
+        m_pImpl = NULL;
+    }
+    return retval;
 }

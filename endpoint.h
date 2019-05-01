@@ -1,9 +1,8 @@
 #pragma once
 
 #include "util.h"
-
+#include "uv.h"
 #include <string>
-#include <arpa/inet.h>
 #include <string.h>
 
 class Endpoint {

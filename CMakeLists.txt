@@ -3,32 +3,38 @@ project("natchk" CXX)
 
 set(CMAKE_CXX_STANDARD 14)
 
-set(CLIENT_SRCS 
-    client.cpp
-    async.cpp
-    async.h
-    endpoint.cpp
-    endpoint.h)
+# libuv 
+add_subdirectory(libuv)
+include_directories(libuv/include)
 
-set(LONGOPT_SRCS 
+# natchk.lib
+set(SRCS
     longopt.cpp 
-    longopt.h)
-
-add_executable(natchk-cli 
-    ${CLIENT_SRCS} 
-    ${LONGOPT_SRCS})
-
-target_link_libraries(natchk-cli libuv.a pthread)
-
-set(SERVER_SRCS
-    server.cpp
+    longopt.h
     async.cpp
     async.h
     endpoint.cpp
-    endpoint.h)
+    endpoint.h
+    util.h
+    log.h)
+    
+source_group("" FILES ${SRCS})
+add_library(natchk ${SRCS})
 
-add_executable(natchk-svr
-    ${SERVER_SRCS}
-    ${LONGOPT_SRCS})
+# natchk-cli
+set(CLIENT_SRCS client.cpp)
+source_group("" FILES ${CLIENT_SRCS})
+add_executable(natchk-cli ${CLIENT_SRCS})
+target_link_libraries(natchk-cli natchk uv_a)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(natchk-cli pthread)
+endif()
 
-target_link_libraries(natchk-svr libuv.a pthread)
+# natchk-svr
+set(SERVER_SRCS server.cpp)
+source_group("" FILES ${SERVER_SRCS})
+add_executable(natchk-svr ${SERVER_SRCS})
+target_link_libraries(natchk-svr natchk uv_a)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(natchk-cli pthread)
+endif()

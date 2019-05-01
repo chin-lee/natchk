@@ -5,7 +5,6 @@
 #include "endpoint.h"
 #include "message.h"
 #include <uv.h>
-#include <arpa/inet.h>
 #include <string>
 #include <vector>
 #include <thread>

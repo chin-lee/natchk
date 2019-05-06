@@ -115,7 +115,7 @@ int main(int argc, char* argv[]) {
             Endpoint ep(AF_INET, ipPort.ip, ipPort.port);
             char buf[1];
             buf[0] = (char)MESSAGE_TYPE_PING;
-            udpSend(udphandle, ep.addr(), buf, sizeof(buf));
+            udpSend(udphandle, ep, buf, sizeof(buf));
         }
     });
     handler.shutdown();

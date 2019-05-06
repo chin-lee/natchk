@@ -59,7 +59,7 @@ static bool udpInit(uv_loop_t& loop,
         return false;
     }
     Endpoint ep(AF_INET, listenAddr.ip, listenAddr.port);
-    retval = uv_udp_bind(&udphandle, ep.addr(), UV_UDP_REUSEADDR);
+    retval = uv_udp_bind(&udphandle, ep, UV_UDP_REUSEADDR);
     if (retval != 0) {
         LOGE << "uv_udp_bind: " << uv_strerror(retval);
         return false;

@@ -7,33 +7,40 @@
 
 class Endpoint {
 public:
-    friend bool operator<(const Endpoint& l, const Endpoint& r);
-    friend bool operator==(const Endpoint& l, const Endpoint& r);
+    typedef const struct sockaddr* ConstSockAddrPtr;
 
-    Endpoint(int family, const std::string& ip, uint16_t port);
+    Endpoint();
+    Endpoint(int af, const std::string& ip, uint16_t port);
     explicit Endpoint(const struct sockaddr* addr);
 
     DEFAULT_COPY_MOVE_AND_ASSIGN(Endpoint);
 
+    bool init(int af, const std::string& ip, uint16_t port);
+    bool init(const struct sockaddr* addr);
+
     const std::string& ip() const;
     uint16_t port() const;
-    const struct sockaddr* addr() const;
-    const struct sockaddr_in* addr4() const;
-    const struct sockaddr_in6* addr6() const;
+
+    ConstSockAddrPtr sockaddr() const;
+    operator ConstSockAddrPtr();
+    operator ConstSockAddrPtr() const;
+
+    const struct sockaddr_in* v4() const;
+    const struct sockaddr_in6* v6() const;
 
     bool serializeToArray(char* buf, int size) const;
     bool parseFromArray(const char* buf, int size);
 
-private:
-    bool parseFromSockaddr(const struct sockaddr* addr);
+    friend bool operator<(const Endpoint& l, const Endpoint& r);
+    friend bool operator==(const Endpoint& l, const Endpoint& r);
 
 private:
-    std::string m_ip;
     union {
         struct sockaddr_in v4;
         struct sockaddr_in6 v6;
-        struct sockaddr sa;
-    } m_addr;
+        struct sockaddr s;
+    } m_sockAddr;
+    mutable std::string m_ip;
 };
 
 inline bool operator<(const Endpoint& l, const Endpoint& r) {
@@ -46,15 +53,15 @@ inline bool operator<(const Endpoint& l, const Endpoint& r) {
 }
 
 inline bool operator==(const Endpoint& l, const Endpoint& r) {
-    if (l.m_addr.sa.sa_family != r.m_addr.sa.sa_family) {
+    if (l.m_sockAddr.s.sa_family != r.m_sockAddr.s.sa_family) {
         return false;
-    } else if (l.m_addr.sa.sa_family == AF_INET) {
-        return (0 == memcmp((const void*)&l.m_addr.v4, 
-                            (const void*)&r.m_addr.v4, 
+    } else if (l.m_sockAddr.s.sa_family == AF_INET) {
+        return (0 == memcmp((const void*)&l.m_sockAddr.v4,
+                            (const void*)&r.m_sockAddr.v4,
                             sizeof(struct sockaddr_in) ) );
-    } else if (l.m_addr.sa.sa_family == AF_INET6) {
-        return (0 == memcmp((const void*)&l.m_addr.v6, 
-                            (const void*)&r.m_addr.v6, 
+    } else if (l.m_sockAddr.s.sa_family == AF_INET6) {
+        return (0 == memcmp((const void*)&l.m_sockAddr.v6,
+                            (const void*)&r.m_sockAddr.v6,
                             sizeof(struct sockaddr_in6) ) );
     }
     return false;

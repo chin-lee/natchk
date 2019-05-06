@@ -1,65 +1,114 @@
 #include "endpoint.h"
 #include <string.h>
 
-Endpoint::Endpoint(int family, const std::string& ip, uint16_t port) 
-    : m_ip(ip) {
-    m_addr.sa.sa_family = family;
-    if ( (AF_INET == family) || (AF_INET6 == family) ) {
-        
-    }
-    if (AF_INET == family) {
-        inet_pton(family, ip.c_str(), &m_addr.v4.sin_addr);
-        m_addr.v4.sin_port = htons(port);
-    } else if (AF_INET6 == family) {
-        inet_pton(family, ip.c_str(), &m_addr.v6.sin6_addr);
-        m_addr.v6.sin6_port = htons(port);
-    }
+Endpoint::Endpoint() {
+  memset(&m_sockAddr, 0, sizeof(m_sockAddr));
+}
+
+Endpoint::Endpoint(int af, const std::string& ip, uint16_t port) {
+    init(af, ip, port);
 }
 
 Endpoint::Endpoint(const struct sockaddr* addr) {
-   parseFromSockaddr(addr);
+    init(addr);
+}
+
+bool Endpoint::init(int af, const std::string& ip, uint16_t port) {
+    m_sockAddr.s.sa_family = af;
+    if (AF_INET == af) {
+        uv_ip4_addr(ip.c_str(), port, &m_sockAddr.v4);
+    } else if (AF_INET6 == af) {
+        uv_ip6_addr(ip.c_str(), port, &m_sockAddr.v6);
+    }
+    return false;
+}
+
+bool Endpoint::init(const struct sockaddr* addr) {
+    m_sockAddr.s.sa_family = addr->sa_family;
+    if (AF_INET == addr->sa_family) {
+        memcpy(&m_sockAddr.v4, addr, sizeof(struct sockaddr_in));
+    } else if (AF_INET6 == addr->sa_family) {
+        memcpy(&m_sockAddr.v6, addr, sizeof(struct sockaddr_in6));
+    }
+    return false;
 }
 
 const std::string& Endpoint::ip() const {
+    if (!m_ip.empty()) {
+        return m_ip;
+    }
+    if (AF_INET == m_sockAddr.s.sa_family) {
+        char buf[INET_ADDRSTRLEN];
+        memset(buf, 0, sizeof(buf));
+        inet_ntop(AF_INET, (void*)&m_sockAddr.v4.sin_addr, buf, sizeof(buf));
+        m_ip = buf;
+    } else if (AF_INET6 == m_sockAddr.s.sa_family) {
+        char buf[INET6_ADDRSTRLEN];
+        memset(buf, 0, sizeof(buf));
+        inet_ntop(AF_INET6, (void*)&m_sockAddr.v6.sin6_addr, buf, sizeof(buf));
+        m_ip = buf;
+    }
     return m_ip;
 }
 
 uint16_t Endpoint::port() const {
-    if (AF_INET == m_addr.sa.sa_family) {
-        return ntohs(m_addr.v4.sin_port);
-    } else if (AF_INET6 == m_addr.sa.sa_family) {
-        return ntohs(m_addr.v6.sin6_port);
+    if (AF_INET == m_sockAddr.s.sa_family) {
+        return ntohs(m_sockAddr.v4.sin_port);
+    } else if (AF_INET6 == m_sockAddr.s.sa_family) {
+        return ntohs(m_sockAddr.v6.sin6_port);
     } else {
         return 0;
     }
 }
 
-const struct sockaddr* Endpoint::addr() const {
-    return &m_addr.sa;
+const struct sockaddr* Endpoint::sockaddr() const {
+    return &m_sockAddr.s;
 }
 
-const struct sockaddr_in* Endpoint::addr4() const {
-    return &m_addr.v4;
+Endpoint::operator ConstSockAddrPtr() {
+    return &m_sockAddr.s;
 }
 
-const struct sockaddr_in6* Endpoint::addr6() const {
-    return &m_addr.v6;
+Endpoint::operator ConstSockAddrPtr() const {
+    return &m_sockAddr.s;
 }
 
-bool Endpoint::parseFromSockaddr(const struct sockaddr* addr) {
-    char buf[INET6_ADDRSTRLEN];
-    bzero(buf, sizeof(buf));
-    if (AF_INET == addr->sa_family) {
-        memcpy((void*)&m_addr, addr, sizeof(struct sockaddr_in));
-        inet_ntop(addr->sa_family, &((struct sockaddr_in*)(addr))->sin_addr, 
-                    buf, INET_ADDRSTRLEN);
-    } else if (AF_INET6 == addr->sa_family) {
-        memcpy((void*)&m_addr, addr, sizeof(struct sockaddr_in6));
-        inet_ntop(addr->sa_family, &((struct sockaddr_in6*)(addr))->sin6_addr, 
-                    buf, INET6_ADDRSTRLEN);
+const struct sockaddr_in* Endpoint::v4() const {
+    return ( (AF_INET == m_sockAddr.s.sa_family) ? &m_sockAddr.v4 : NULL);
+}
+
+const struct sockaddr_in6* Endpoint::v6() const {
+    return ( (AF_INET6 == m_sockAddr.s.sa_family) ? &m_sockAddr.v6 : NULL );
+}
+
+bool Endpoint::serializeToArray(char* buf, int size) const {
+    int sizeReq = 0;
+    if (AF_INET == m_sockAddr.s.sa_family) {
+        sizeReq = sizeof(struct sockaddr_in);
+    } else if (AF_INET6 == m_sockAddr.s.sa_family) {
+        sizeReq = sizeof(struct sockaddr_in6);
     } else {
         return false;
     }
-    m_ip = buf;
+    if (size < sizeReq) {
+        return false;
+    }
+    memcpy(buf, &m_sockAddr, sizeReq);
     return true;
+}
+
+bool Endpoint::parseFromArray(const char* buf, int size) {
+    const struct sockaddr* sa = (const struct sockaddr*)buf;
+    int sizeReq = 0;
+    if (AF_INET == sa->sa_family) {
+        sizeReq = sizeof(struct sockaddr_in);
+    } else if (AF_INET6 == sa->sa_family) {
+        sizeReq = sizeof(struct sockaddr_in6);
+    } else {
+        return false;
+    }
+    if (size < sizeReq) {
+        return false;
+    }
+    return init(sa);
 }

@@ -15,6 +15,9 @@ set(SRCS
     async.h
     endpoint.cpp
     endpoint.h
+    udpsvc.cpp
+    udpsvc.h
+    util.cpp
     util.h
     log.h)
     

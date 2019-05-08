@@ -81,20 +81,20 @@ const struct sockaddr_in6* Endpoint::v6() const {
     return ( (AF_INET6 == m_sockAddr.s.sa_family) ? &m_sockAddr.v6 : NULL );
 }
 
-bool Endpoint::serializeToArray(char* buf, int size) const {
+int Endpoint::serializeToArray(char* buf, int size) const {
     int sizeReq = 0;
     if (AF_INET == m_sockAddr.s.sa_family) {
         sizeReq = sizeof(struct sockaddr_in);
     } else if (AF_INET6 == m_sockAddr.s.sa_family) {
         sizeReq = sizeof(struct sockaddr_in6);
     } else {
-        return false;
+        return 0;
     }
     if (size < sizeReq) {
-        return false;
+        return 0;
     }
     memcpy(buf, &m_sockAddr, sizeReq);
-    return true;
+    return sizeReq;
 }
 
 bool Endpoint::parseFromArray(const char* buf, int size) {

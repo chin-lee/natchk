@@ -19,7 +19,7 @@ public:
     // |handler| will be called on the thread who runs the loop
     bool shutdown(ShutdownHandlerType&& handler);
 
-    // This function will block until the inernal uv_async_t is shutdown
+    // This function will block until the inernal uv_async_t is closed
     bool shutdown();
 
 private:

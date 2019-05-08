@@ -28,7 +28,7 @@ public:
     const struct sockaddr_in* v4() const;
     const struct sockaddr_in6* v6() const;
 
-    bool serializeToArray(char* buf, int size) const;
+    int serializeToArray(char* buf, int size) const;
     bool parseFromArray(const char* buf, int size);
 
     friend bool operator<(const Endpoint& l, const Endpoint& r);
@@ -44,7 +44,7 @@ private:
 };
 
 inline bool operator<(const Endpoint& l, const Endpoint& r) {
-    int retval = l.m_ip.compare(r.m_ip);
+    int retval = l.ip().compare(r.ip());
     if (0 == retval) {
         return (l.port() < r.port());
     } else {

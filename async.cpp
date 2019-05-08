@@ -103,8 +103,8 @@ AsyncHandler::AsyncHandler(uv_loop_t& loop)
 
 AsyncHandler::~AsyncHandler() {
     if (NULL != m_pImpl) {
-        m_impl.shutdown();
-        delete m_pImpl;
+        // |m_pImpl| will be destroyed when uv_async_t is closed
+        m_impl.shutdown({});
     }
 }
 
@@ -113,7 +113,11 @@ bool AsyncHandler::post(HandlerType&& handler) {
 }
 
 bool AsyncHandler::shutdown(ShutdownHandlerType&& handler) {
-    return m_impl.shutdown(std::move(handler));
+    bool retval = m_impl.shutdown(std::move(handler));
+    if (retval) {
+        m_pImpl = NULL;
+    }
+    return retval;
 }
 
 bool AsyncHandler::shutdown() {

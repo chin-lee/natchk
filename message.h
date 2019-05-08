@@ -1,5 +1,7 @@
 #pragma once
 
-enum MessageType {
-    MESSAGE_TYPE_PING = 1
+enum class MessageId {
+    PING = 1,
+    GETADDR,
+    ADDR
 };

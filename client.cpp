@@ -4,70 +4,131 @@
 #include "async.h"
 #include "endpoint.h"
 #include "message.h"
+#include "udpsvc.h"
 #include <uv.h>
 #include <string>
 #include <vector>
+#include <map>
 #include <thread>
 #include <stdlib.h>
 
-struct SendReq {
-    uv_udp_send_t handle;
-    Endpoint peer;
-    int size;
-    char data[1];
-};
-
 static const option_t kOptions[] = {
     { '-', NULL, 0, NULL, "arguments:" },
+    { 'l', "listen-udp", LONGOPT_REQUIRE, NULL, "<ip>:<port>"},
     { 's', "servers", LONGOPT_REQUIRE, NULL, "udp server list <ip>:<port>,<ip>:<port>,..." },
     { 0, NULL, 0, NULL, NULL }
 };
 
-static bool udpInit(uv_loop_t& loop, uv_udp_t& handle) {
-    int retval = uv_udp_init(&loop, &handle);
-    if (retval < 0) {
-        LOGE << "uv_udp_init: " << uv_strerror(retval);
-        return false;
+static const int kGetAddrIntervalMillis = 2000;
+static const int kMaxGetAddrCount = 5;
+
+class Client;
+
+struct GetPubAddrTask {
+    Client& m_client;
+    Endpoint m_svr;
+    uv_timer_t m_timer;
+    int m_tryCount;
+
+    static void onTimeout(uv_timer_t* handle) {
+        GetPubAddrTask* self = CONTAINER_OF(handle, GetPubAddrTask, m_timer);
+        if (self->m_tryCount < kMaxGetAddrCount) {
+            self->send();
+            self->m_tryCount += 1;
+        } else {
+            LOGW << "failed to get address from " << self->m_svr.ip() 
+                 << ":" << self->m_svr.port();
+            self->stop();
+        }
     }
-    sockaddr_in addr;
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = 10336;
-    retval = uv_udp_bind(&handle, 
-        (const struct sockaddr*)&addr, 
-        UV_UDP_REUSEADDR);
-    if (retval < 0) {
-        LOGE << "uv_udp_bind: " << uv_strerror(retval);
-        return false;
+
+    static void onCloseHandle(uv_handle_t* handle) {
+        GetPubAddrTask* self = CONTAINER_OF(handle, GetPubAddrTask, m_timer);
+        delete self;
     }
-    return true;
+
+    GetPubAddrTask(Client& client, const Endpoint& svr);
+    void send();
+    void stop();
+};
+
+class Client : public UdpService::IMessageHandler {
+    friend class GetPubAddrTask;
+
+    uv_loop_t& m_loop;
+    UdpService m_udpSvc;
+    std::vector<IpPort> m_svrList;
+
+    typedef std::map<Endpoint, GetPubAddrTask*> GetPubAddrTaskMap;
+    GetPubAddrTaskMap m_getPubAddrTaskMap;
+
+    typedef std::map<Endpoint, Endpoint> PubAddrMap;
+    PubAddrMap m_pubAddrMap;
+
+public:
+    Client(uv_loop_t& loop, const Endpoint& listenAddr, 
+           const std::vector<IpPort>& svrList)
+        : m_loop(loop), m_udpSvc(loop, listenAddr), m_svrList(svrList) {
+        m_udpSvc.addMessageHandler(this);
+        m_udpSvc.start();
+        for (const IpPort& addr : m_svrList) {
+            Endpoint endpoint(AF_INET, addr.ip, addr.port);
+            getPubAddr(endpoint);
+        }
+    }
+
+    void handleMessage(UdpService& udpSvc, const Endpoint& peer, 
+                       const char* data, int size) override {
+        MessageId msgId = MessageId(data[0]);
+        switch (msgId) {
+        case MessageId::ADDR:
+            {
+                const struct sockaddr* sa = 
+                        (const struct sockaddr*)(data + 1);
+                Endpoint me(sa);
+                LOGI << "recv ADDR from " << peer.ip() << ":" << peer.port() 
+                     << ", my address is " << me.ip() << ":" << me.port();
+                auto it = m_getPubAddrTaskMap.find(peer);
+                if (it != m_getPubAddrTaskMap.end()) {
+                    m_pubAddrMap.emplace(peer, me);
+                    it->second->stop();
+                }
+            }
+            break;
+        default:
+            LOGW << "unknown message " << int(msgId) << " recvd";
+            break;
+        }
+    }
+
+private:
+    void getPubAddr(const Endpoint& svr) {
+        GetPubAddrTask* task = new GetPubAddrTask(*this, svr);
+        m_getPubAddrTaskMap.emplace(svr, task);
+    }
+};
+
+GetPubAddrTask::GetPubAddrTask(Client& client, const Endpoint& svr)
+    : m_client(client), m_svr(svr), m_tryCount(0) {
+    uv_timer_init(&client.m_loop, &m_timer);
+    uv_timer_start(&m_timer, onTimeout, 0, kGetAddrIntervalMillis);
 }
 
-static void handleSend(uv_udp_send_t* req, int status) {
-    SendReq* sr = CONTAINER_OF(req, SendReq, handle);
-    LOGI << "sent " << sr->size << " byte(s) to " << sr->peer.ip() 
-         << ":" << sr->peer.port() << ": " << uv_strerror(status);
-    free(sr);
+void GetPubAddrTask::send() {
+    LOGD << "send GETADDR to " << m_svr.ip() << ":" << m_svr.port();
+    char buf[1];
+    buf[0] = char(MessageId::GETADDR);
+    m_client.m_udpSvc.send(m_svr, buf, 1);
 }
 
-static bool udpSend(uv_udp_t& handle, const struct sockaddr* addr, 
-                    const char* data, int size) {
-    SendReq* req = (SendReq*)malloc(sizeof(SendReq) + size);
-    new(&req->peer) Endpoint(addr);
-    req->size = size;
-    memcpy(req->data, data, size);
-    uv_buf_t bufs[1];
-    bufs[0].base = req->data;
-    bufs[0].len = req->size;
-    int retval = uv_udp_send(&req->handle, &handle, bufs, 1, addr, handleSend);
-    if (retval < 0) {
-        LOGE << "uv_udp_send: " << uv_strerror(retval);
-        return false;
-    }
-    return true;
+void GetPubAddrTask::stop() {
+    uv_timer_stop(&m_timer);
+    uv_close((uv_handle_t*)&m_timer, onCloseHandle);
+    m_client.m_getPubAddrTaskMap.erase(m_svr);
 }
 
 int main(int argc, char* argv[]) {
+    std::string listenAddrStr;
     std::string svrAddrListStr;
     int opt;
     while ( (opt = longopt(argc, argv, kOptions)) != LONGOPT_DONE ) {
@@ -81,13 +142,25 @@ int main(int argc, char* argv[]) {
         }
         switch (opt) {
         case 1:
+            listenAddrStr = optparam;
+            break;
+        case 2:
             svrAddrListStr = optparam;
             break;
         }
     }
 
-    if (svrAddrListStr.empty()) {
+    if (listenAddrStr.empty()) {
         print_opt(kOptions);
+        return 1;
+    } else if (svrAddrListStr.empty()) {
+        print_opt(kOptions);
+        return 1;
+    }
+
+    IpPort listenAddr;
+    if (!util::parseIpPort(listenAddrStr, listenAddr)) {
+        LOGE << "invalid argument " << listenAddrStr;
         return 1;
     }
 
@@ -106,17 +179,9 @@ int main(int argc, char* argv[]) {
         uv_run(&mainloop, UV_RUN_DEFAULT);
     });
 
-    uv_udp_t udphandle;
     handler.post([&]() {
-        if (!udpInit(mainloop, udphandle)) {
-            return;
-        }
-        for (const IpPort& ipPort : svrAddrList) {
-            Endpoint ep(AF_INET, ipPort.ip, ipPort.port);
-            char buf[1];
-            buf[0] = (char)MESSAGE_TYPE_PING;
-            udpSend(udphandle, ep, buf, sizeof(buf));
-        }
+        Endpoint endpoint(AF_INET, listenAddr.ip, listenAddr.port);
+        new Client(mainloop, endpoint, svrAddrList);
     });
     handler.shutdown();
 

@@ -4,77 +4,40 @@
 #include "async.h"
 #include "endpoint.h"
 #include "message.h"
+#include "udpsvc.h"
 #include <thread>
 
 static const option_t kOptions[] = {
     { '-', NULL, 0, NULL, "arguments:" },
-    { 'l', "listen-udp", LONGOPT_REQUIRE, NULL, "<ip>:<port>"},
+    { 'l', "listen-udp", LONGOPT_REQUIRE, NULL, "<ip>:<port>,<ip>:<port>,..."},
     { 0, NULL, 0, NULL, NULL }
 };
 
-static void handleAlloc(uv_handle_t* handle, 
-                        size_t suggested_size, 
-                        uv_buf_t* buf) {
-    buf->base = (char*)malloc(suggested_size);
-    buf->len = suggested_size;
-    (void)handle;
-}
-
-static void handleRecv(uv_udp_t* handle, ssize_t nread, 
-                           const uv_buf_t* buf, 
-                           const struct sockaddr* addr, 
-                           unsigned flags) {
-    if (0 == nread && NULL == addr) {
-        free(buf->base);
-        return;
-    }
-    Endpoint peer(addr);
-    LOGI << "recv " << nread << " byte(s) from " << peer.ip() 
-         << ":" << peer.port();
-    if ( (flags & UV_UDP_PARTIAL) != 0 ) {
-        LOGE << "partial data received from " << peer.ip() << ":" 
-                << peer.port();
-        free(buf->base);
-        return;
-    }
-    if (nread > 0) {
-        int msgType = buf->base[0];
-        switch (msgType) {
-        case MESSAGE_TYPE_PING:
-            LOGI << "recv PING from " << peer.ip() << ":" << peer.port();
+class MessageHandler : public UdpService::IMessageHandler {
+public:
+     void handleMessage(UdpService& udpSvc, const Endpoint& peer, 
+                        const char* data, int size) override {
+        MessageId msgId = MessageId(data[0]);
+        switch (msgId) {
+        case MessageId::GETADDR:
+            {
+                LOGD << "recv GETADDR from " << peer.ip() << ":" << peer.port();
+                char buf[1 + sizeof(struct sockaddr_in6)];
+                memset(buf, 0, sizeof(buf));
+                buf[0] = char(MessageId::ADDR);
+                int size = peer.serializeToArray(
+                        buf + 1, sizeof(struct sockaddr_in6));
+                udpSvc.send(peer, buf, 1 + size);
+            }
             break;
         default:
-            LOGI << "recv unknown message from " << peer.ip() 
-                 << ":" << peer.port();
+            break;
         }
     }
-}
-
-static bool udpInit(uv_loop_t& loop, 
-                    uv_udp_t& udphandle, 
-                    const IpPort& listenAddr) {
-    int retval = uv_udp_init(&loop, &udphandle);
-    if (retval != 0) {
-        LOGE << "uv_udp_init: " << uv_strerror(retval);
-        return false;
-    }
-    Endpoint ep(AF_INET, listenAddr.ip, listenAddr.port);
-    retval = uv_udp_bind(&udphandle, ep, UV_UDP_REUSEADDR);
-    if (retval != 0) {
-        LOGE << "uv_udp_bind: " << uv_strerror(retval);
-        return false;
-    }
-    retval = uv_udp_recv_start(&udphandle, handleAlloc, handleRecv);
-    if (retval != 0) {
-        LOGE << "uv_udp_recv_start: " << uv_strerror(retval);
-        return false;
-    }
-    LOGI << "udp service listen on " << ep.ip() << ":" << ep.port();
-    return true;
-}
+};
 
 int main(int argc, char* argv[]) {
-    std::string listenAddrStr;
+    std::string listenAddrListStr;
     int opt;
     while ( (opt = longopt(argc, argv, kOptions)) != LONGOPT_DONE ) {
         if (LONGOPT_NEED_PARAM == opt) {
@@ -87,19 +50,19 @@ int main(int argc, char* argv[]) {
         }
         switch (opt) {
         case 1:
-            listenAddrStr = optparam;
+            listenAddrListStr = optparam;
             break;
         }
     }
 
-    if (listenAddrStr.empty()) {
+    if (listenAddrListStr.empty()) {
         print_opt(kOptions);
         return 1;
     }
 
-    IpPort listenAddr;
-    if (!util::parseIpPort(listenAddrStr, listenAddr)) {
-        LOGE << "invalid argument " << listenAddrStr;
+    std::vector<IpPort> listenAddrList;
+    if (!util::parseIpPortList(listenAddrListStr, listenAddrList)) {
+        LOGE << "invalid argument " << listenAddrListStr;
         return 1;
     }
 
@@ -112,10 +75,15 @@ int main(int argc, char* argv[]) {
         uv_run(&mainloop, UV_RUN_DEFAULT);
     });
 
-    uv_udp_t udphandle;
+    MessageHandler* msgHandler = new MessageHandler;
+    std::vector<UdpService*> udpSvcList;
     handler.post([&]() {
-        if (!udpInit(mainloop, udphandle, listenAddr)) {
-            return;
+        for (const IpPort& addr : listenAddrList) {
+            Endpoint endpoint(AF_INET, addr.ip, addr.port);
+            UdpService* udpSvc = new UdpService(mainloop, endpoint);
+            udpSvc->start();
+            udpSvc->addMessageHandler(msgHandler);
+            udpSvcList.push_back(udpSvc);
         }
     });
 

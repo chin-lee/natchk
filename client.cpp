@@ -24,14 +24,14 @@ static const int kMaxGetAddrCount = 5;
 
 class Client;
 
-struct GetPubAddrTask {
+struct GetAddrTask {
     Client& m_client;
     Endpoint m_svr;
     uv_timer_t m_timer;
     int m_tryCount;
 
     static void onTimeout(uv_timer_t* handle) {
-        GetPubAddrTask* self = CONTAINER_OF(handle, GetPubAddrTask, m_timer);
+        GetAddrTask* self = CONTAINER_OF(handle, GetAddrTask, m_timer);
         if (self->m_tryCount < kMaxGetAddrCount) {
             self->send();
             self->m_tryCount += 1;
@@ -43,27 +43,27 @@ struct GetPubAddrTask {
     }
 
     static void onCloseHandle(uv_handle_t* handle) {
-        GetPubAddrTask* self = CONTAINER_OF(handle, GetPubAddrTask, m_timer);
+        GetAddrTask* self = CONTAINER_OF(handle, GetAddrTask, m_timer);
         delete self;
     }
 
-    GetPubAddrTask(Client& client, const Endpoint& svr);
+    GetAddrTask(Client& client, const Endpoint& svr);
     void send();
     void stop();
 };
 
 class Client : public UdpService::IMessageHandler {
-    friend class GetPubAddrTask;
+    friend class GetAddrTask;
 
     uv_loop_t& m_loop;
     UdpService m_udpSvc;
     std::vector<IpPort> m_svrList;
 
-    typedef std::map<Endpoint, GetPubAddrTask*> GetPubAddrTaskMap;
-    GetPubAddrTaskMap m_getPubAddrTaskMap;
+    typedef std::map<Endpoint, GetAddrTask*> GetAddrTaskMap;
+    GetAddrTaskMap m_getAddrTaskMap;
 
-    typedef std::map<Endpoint, Endpoint> PubAddrMap;
-    PubAddrMap m_pubAddrMap;
+    typedef std::map<Endpoint, Endpoint> AddrMap;
+    AddrMap m_addrMap;
 
 public:
     Client(uv_loop_t& loop, const Endpoint& listenAddr, 
@@ -73,7 +73,7 @@ public:
         m_udpSvc.start();
         for (const IpPort& addr : m_svrList) {
             Endpoint endpoint(AF_INET, addr.ip, addr.port);
-            getPubAddr(endpoint);
+            getAddr(endpoint);
         }
     }
 
@@ -88,9 +88,9 @@ public:
                 Endpoint me(sa);
                 LOGI << "recv ADDR from " << peer.ip() << ":" << peer.port() 
                      << ", my address is " << me.ip() << ":" << me.port();
-                auto it = m_getPubAddrTaskMap.find(peer);
-                if (it != m_getPubAddrTaskMap.end()) {
-                    m_pubAddrMap.emplace(peer, me);
+                auto it = m_getAddrTaskMap.find(peer);
+                if (it != m_getAddrTaskMap.end()) {
+                    m_addrMap.emplace(peer, me);
                     it->second->stop();
                 }
             }
@@ -102,29 +102,29 @@ public:
     }
 
 private:
-    void getPubAddr(const Endpoint& svr) {
-        GetPubAddrTask* task = new GetPubAddrTask(*this, svr);
-        m_getPubAddrTaskMap.emplace(svr, task);
+    void getAddr(const Endpoint& svr) {
+        GetAddrTask* task = new GetAddrTask(*this, svr);
+        m_getAddrTaskMap.emplace(svr, task);
     }
 };
 
-GetPubAddrTask::GetPubAddrTask(Client& client, const Endpoint& svr)
+GetAddrTask::GetAddrTask(Client& client, const Endpoint& svr)
     : m_client(client), m_svr(svr), m_tryCount(0) {
     uv_timer_init(&client.m_loop, &m_timer);
     uv_timer_start(&m_timer, onTimeout, 0, kGetAddrIntervalMillis);
 }
 
-void GetPubAddrTask::send() {
+void GetAddrTask::send() {
     LOGD << "send GETADDR to " << m_svr.ip() << ":" << m_svr.port();
     char buf[1];
     buf[0] = char(MessageId::GETADDR);
     m_client.m_udpSvc.send(m_svr, buf, 1);
 }
 
-void GetPubAddrTask::stop() {
+void GetAddrTask::stop() {
     uv_timer_stop(&m_timer);
     uv_close((uv_handle_t*)&m_timer, onCloseHandle);
-    m_client.m_getPubAddrTaskMap.erase(m_svr);
+    m_client.m_getAddrTaskMap.erase(m_svr);
 }
 
 int main(int argc, char* argv[]) {

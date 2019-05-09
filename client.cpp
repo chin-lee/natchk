@@ -115,6 +115,7 @@ private:
                 continue;
             }
         }
+        uv_free_interface_addresses(addrs, count);
         LOGI << "found " << m_interfaceMap.size() << " interface(s)";
         for (auto it = m_interfaceMap.begin(); 
                 it != m_interfaceMap.end(); ++it) {

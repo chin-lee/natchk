@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <set>
 #include <thread>
 #include <stdlib.h>
 
@@ -22,36 +23,47 @@ static const option_t kOptions[] = {
 static const int kGetAddrIntervalMillis = 2000;
 static const int kMaxGetAddrCount = 5;
 
-class Client;
+struct InterfaceAddress {
+    std::string name;
+    Endpoint addr4;
+    Endpoint addr6;
+};
 
-struct GetAddrTask {
+struct CheckSymmetricNatContext {
+    std::vector<Endpoint> myAddrList;
+    int finishedTasks;
+};
+
+class Client;
+// -----------------------------------------------------------------------------
+// Section: GetAddrTask
+// -----------------------------------------------------------------------------
+class GetAddrTask : public UdpService::IMessageHandler {
+    typedef std::function<void(const Endpoint*)> CompletionHandler;
+
     Client& m_client;
     Endpoint m_svr;
     uv_timer_t m_timer;
     int m_tryCount;
+    CompletionHandler m_completionHandler;
 
-    static void onTimeout(uv_timer_t* handle) {
-        GetAddrTask* self = CONTAINER_OF(handle, GetAddrTask, m_timer);
-        if (self->m_tryCount < kMaxGetAddrCount) {
-            self->send();
-            self->m_tryCount += 1;
-        } else {
-            LOGW << "failed to get address from " << self->m_svr.ip() 
-                 << ":" << self->m_svr.port();
-            self->stop();
-        }
-    }
+public:
+    static void onTimeout(uv_timer_t* handle);
+    static void onCloseHandle(uv_handle_t* handle);
 
-    static void onCloseHandle(uv_handle_t* handle) {
-        GetAddrTask* self = CONTAINER_OF(handle, GetAddrTask, m_timer);
-        delete self;
-    }
+    GetAddrTask(Client& client, const Endpoint& svr, 
+                CompletionHandler&& handler);
 
-    GetAddrTask(Client& client, const Endpoint& svr);
+private:
+    void handleMessage(UdpService& udpSvc, const Endpoint& peer, 
+                       const char* data, int size) override;
     void send();
     void stop();
 };
 
+// -----------------------------------------------------------------------------
+// Section: Client
+// -----------------------------------------------------------------------------
 class Client : public UdpService::IMessageHandler {
     friend class GetAddrTask;
 
@@ -59,11 +71,8 @@ class Client : public UdpService::IMessageHandler {
     UdpService m_udpSvc;
     std::vector<IpPort> m_svrList;
 
-    typedef std::map<Endpoint, GetAddrTask*> GetAddrTaskMap;
-    GetAddrTaskMap m_getAddrTaskMap;
-
-    typedef std::map<Endpoint, Endpoint> AddrMap;
-    AddrMap m_addrMap;
+    typedef std::map<std::string, InterfaceAddress> InterfaceMap;
+    InterfaceMap m_interfaceMap;
 
 public:
     Client(uv_loop_t& loop, const Endpoint& listenAddr, 
@@ -71,47 +80,158 @@ public:
         : m_loop(loop), m_udpSvc(loop, listenAddr), m_svrList(svrList) {
         m_udpSvc.addMessageHandler(this);
         m_udpSvc.start();
-        for (const IpPort& addr : m_svrList) {
-            Endpoint endpoint(AF_INET, addr.ip, addr.port);
-            getAddr(endpoint);
-        }
+        queryInterfaceAddresses();
+        checkIfBehindNat();
     }
 
     void handleMessage(UdpService& udpSvc, const Endpoint& peer, 
                        const char* data, int size) override {
-        MessageId msgId = MessageId(data[0]);
-        switch (msgId) {
-        case MessageId::ADDR:
-            {
-                const struct sockaddr* sa = 
-                        (const struct sockaddr*)(data + 1);
-                Endpoint me(sa);
-                LOGI << "recv ADDR from " << peer.ip() << ":" << peer.port() 
-                     << ", my address is " << me.ip() << ":" << me.port();
-                auto it = m_getAddrTaskMap.find(peer);
-                if (it != m_getAddrTaskMap.end()) {
-                    m_addrMap.emplace(peer, me);
-                    it->second->stop();
-                }
-            }
-            break;
-        default:
-            LOGW << "unknown message " << int(msgId) << " recvd";
-            break;
-        }
     }
 
 private:
-    void getAddr(const Endpoint& svr) {
-        GetAddrTask* task = new GetAddrTask(*this, svr);
-        m_getAddrTaskMap.emplace(svr, task);
+    void queryInterfaceAddresses() {
+        uv_interface_address_t* addrs;
+        int count = 0;
+        int retval = uv_interface_addresses(&addrs, &count);
+        if (retval != 0) {
+            LOGE << "uv_interface_addresses: " << uv_strerror(retval);
+            return;
+        }
+        for (int i = 0; i < count; i++) {
+            uv_interface_address_t& entry = addrs[i];
+            std::string name = entry.name;
+            Endpoint endpoint((const struct sockaddr*)&entry.address);
+            InterfaceAddress& ia = m_interfaceMap[name];
+            ia.name = name;
+            int af = endpoint.sockaddr()->sa_family;
+            if (AF_INET == af) {
+                ia.addr4 = endpoint;
+            } else if (AF_INET6 == af) {
+                ia.addr6 = endpoint;
+            } else {
+                LOGW << "unsupported address family " << af 
+                     << " found on interface " << name 
+                     << ", ignoring";
+                continue;
+            }
+        }
+        LOGI << "found " << m_interfaceMap.size() << " interface(s)";
+        for (auto it = m_interfaceMap.begin(); 
+                it != m_interfaceMap.end(); ++it) {
+            const InterfaceAddress& ia = it->second;
+            LOGI << ia.name 
+                 << ", v4: " << (ia.addr4.v4() ? ia.addr4.ip() : "") 
+                 << ", v6: " << (ia.addr6.v6() ? ia.addr6.ip() : "");
+        }
+    }
+
+    void checkIfBehindNat() {
+        LOGI << "check if behind NAT";
+        const IpPort& addr = m_svrList[0];
+        Endpoint endpoint(AF_INET, addr.ip, addr.port);
+        new GetAddrTask(*this, endpoint, [this](const Endpoint* myAddr) {
+            if (nullptr == myAddr) {
+                return;
+            }
+            bool behindNat = true;
+            for (auto it = m_interfaceMap.begin(); 
+                    it != m_interfaceMap.end(); ++it) {
+                const InterfaceAddress& ia = it->second;
+                if (*myAddr == ia.addr4 || *myAddr == ia.addr6) {
+                    behindNat = false;
+                    break;
+                }
+            }
+            if (!behindNat) {
+                LOGI << "host has public ip address!";
+            } else {
+                LOGI << "host may behind NAT!";
+                checkIfSymmetricNat();
+            }
+        });
+    }
+
+    void checkIfFullConeNat() {
+
+    }
+
+    void checkIfSymmetricNat() {
+        if (m_svrList.size() < 2) {
+            LOGW << "you must specify more than TWO servers with public IP "
+                    "address for checking symmetric NAT";
+            return;
+        }
+        LOGI << "check symmetric NAT";
+        CheckSymmetricNatContext* ctx = new CheckSymmetricNatContext;
+        ctx->myAddrList.reserve(m_svrList.size());
+        ctx->finishedTasks = 0;
+        for (const IpPort& addr : m_svrList) {
+            Endpoint endpoint(AF_INET, addr.ip, addr.port);
+            new GetAddrTask(*this, endpoint, [this, ctx](
+                                                const Endpoint* myAddr) {
+                ctx->finishedTasks += 1;
+                if (nullptr != myAddr) {
+                    ctx->myAddrList.emplace_back(*myAddr);
+                }
+                if (ctx->finishedTasks == m_svrList.size()) {
+                    std::map<std::string, std::set<uint16_t>> ipPorts;
+                    for (const Endpoint& ep : ctx->myAddrList) {
+                        std::set<uint16_t>& portSet = ipPorts[ep.ip()];
+                        portSet.insert(ep.port());
+                        if (portSet.size() >= 2) {
+                            LOGI << "Symmetric NAT!";
+                        }
+                    }
+                    delete ctx;
+                }
+            });
+        }
     }
 };
 
-GetAddrTask::GetAddrTask(Client& client, const Endpoint& svr)
-    : m_client(client), m_svr(svr), m_tryCount(0) {
+// -----------------------------------------------------------------------------
+// Section: GetAddrTask implementation
+// -----------------------------------------------------------------------------
+// static
+void GetAddrTask::onTimeout(uv_timer_t* handle) {
+    GetAddrTask* self = CONTAINER_OF(handle, GetAddrTask, m_timer);
+    if (self->m_tryCount < kMaxGetAddrCount) {
+        self->send();
+        self->m_tryCount += 1;
+    } else {
+        LOGW << "failed to get address from " << self->m_svr.ip() 
+             << ":" << self->m_svr.port();
+        self->m_completionHandler(nullptr);
+        self->stop();
+    }
+}
+
+// static
+void GetAddrTask::onCloseHandle(uv_handle_t* handle) {
+    GetAddrTask* self = CONTAINER_OF(handle, GetAddrTask, m_timer);
+    delete self;
+}
+
+GetAddrTask::GetAddrTask(Client& client, const Endpoint& svr,
+                         CompletionHandler&& handler)
+    : m_client(client), m_svr(svr), m_tryCount(0)
+    , m_completionHandler(std::move(handler)) {
     uv_timer_init(&client.m_loop, &m_timer);
     uv_timer_start(&m_timer, onTimeout, 0, kGetAddrIntervalMillis);
+    m_client.m_udpSvc.addMessageHandler(this);
+}
+
+void GetAddrTask::handleMessage(UdpService& udpSvc, const Endpoint& peer, 
+                                const char* data, int size) {
+    MessageId msgId = MessageId(data[0]);
+    if ( (MessageId::ADDR == msgId) && (peer == m_svr) ) {
+        const struct sockaddr* sa = (const struct sockaddr*)(data + 1);
+        Endpoint myAddr(sa);
+        LOGI << "recv ADDR from " << peer.ip() << ":" << peer.port() 
+             << ", my address is " << myAddr.ip() << ":" << myAddr.port();
+        m_completionHandler(&myAddr);
+        stop();
+    }
 }
 
 void GetAddrTask::send() {
@@ -124,9 +244,12 @@ void GetAddrTask::send() {
 void GetAddrTask::stop() {
     uv_timer_stop(&m_timer);
     uv_close((uv_handle_t*)&m_timer, onCloseHandle);
-    m_client.m_getAddrTaskMap.erase(m_svr);
+    m_client.m_udpSvc.removeMessageHandler(this);
 }
 
+// -----------------------------------------------------------------------------
+// Section: main
+// -----------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
     std::string listenAddrStr;
     std::string svrAddrListStr;
@@ -177,6 +300,7 @@ int main(int argc, char* argv[]) {
 
     std::thread t([&mainloop]() {
         uv_run(&mainloop, UV_RUN_DEFAULT);
+        LOGD << "mainloop exied";
     });
 
     handler.post([&]() {

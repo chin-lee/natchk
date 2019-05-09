@@ -3,5 +3,10 @@
 enum class MessageId {
     PING = 1,
     GETADDR,
-    ADDR
+    ADDR,
+    CHKFULLCONE,
+    SENDFULLCONE,
+    FULLCONE,
+    CHKRESTRICTEDCONE,
+    RESTRICTEDCONE
 };

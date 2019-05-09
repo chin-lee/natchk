@@ -23,6 +23,19 @@ static const option_t kOptions[] = {
 static const int kGetAddrIntervalMillis = 2000;
 static const int kMaxGetAddrCount = 5;
 
+static const int kChkFullConeIntervalMillis = 2000;
+static const int kMaxChkFullConeCount = 10;
+
+static const int kChkRestrictedConeIntervalMillis = 2000;
+static const int kMaxChkRestrictedConeCount = 5;
+
+enum {
+    kFullCone = 1,
+    kRestrictedCone,
+    kPortRestrictedCone,
+    kSymmetric
+};
+
 struct InterfaceAddress {
     std::string name;
     Endpoint addr4;
@@ -62,10 +75,68 @@ private:
 };
 
 // -----------------------------------------------------------------------------
+// Section: CheckFullConeTask
+// -----------------------------------------------------------------------------
+class CheckFullConeTask : public UdpService::IMessageHandler {
+    typedef std::function<void(bool isOk)> CompletionHandler;
+
+    Client& m_client;
+    Endpoint m_svr;
+    Endpoint m_svrUnknown;
+    uv_timer_t m_timer;
+    int m_tryCount;
+    CompletionHandler m_completionHandler;
+
+public:
+    static void onTimeout(uv_timer_t* handle);
+    static void onCloseHandle(uv_handle_t* handle);
+
+    CheckFullConeTask(Client& client, 
+                      const Endpoint& svr, 
+                      const Endpoint& svrUnknown, 
+                      CompletionHandler&& handler);
+
+private:
+    void handleMessage(UdpService& udpSvc, const Endpoint& peer, 
+                       const char* data, int size) override;
+    void send();
+    void stop();
+};
+
+// -----------------------------------------------------------------------------
+// Section: CheckRestrictedConeTask
+// -----------------------------------------------------------------------------
+class CheckRestrictedConeTask : public UdpService::IMessageHandler {
+    typedef std::function<void(int natType)> CompletionHandler;
+
+    Client& m_client;
+    Endpoint m_svr;
+    uv_timer_t m_timer;
+    int m_tryCount;
+    CompletionHandler m_completionHandler;
+
+public:
+    static void onTimeout(uv_timer_t* handle);
+    static void onCloseHandle(uv_handle_t* handle);
+
+    CheckRestrictedConeTask(Client& client, 
+                            const Endpoint& svr, 
+                            CompletionHandler&& handler);
+
+private:
+    void handleMessage(UdpService& udpSvc, const Endpoint& peer, 
+                       const char* data, int size) override;
+    void send();
+    void stop();
+}; 
+
+// -----------------------------------------------------------------------------
 // Section: Client
 // -----------------------------------------------------------------------------
 class Client : public UdpService::IMessageHandler {
     friend class GetAddrTask;
+    friend class CheckFullConeTask;
+    friend class CheckRestrictedConeTask;
 
     uv_loop_t& m_loop;
     UdpService m_udpSvc;
@@ -146,23 +217,39 @@ private:
             if (!behindNat) {
                 LOGI << "host has public ip address!";
             } else {
-                LOGI << "host may behind NAT!";
-                checkIfSymmetricNat();
+                LOGI << "host MAY behind NAT!";
+                checkIfFullConeNat();
             }
         });
     }
 
     void checkIfFullConeNat() {
-
+        if (m_svrList.size() < 2) {
+            LOGW << "you must specify more than TWO servers with public IP "
+                    "address for checking FULL CONE NAT";
+            return;
+        }
+        LOGI << "check if FULL CONE NAT";
+        const IpPort& addr1 = m_svrList[0];
+        const IpPort& addr2 = m_svrList[1];
+        Endpoint endpoint1(AF_INET, addr1.ip, addr1.port);
+        Endpoint endpoint2(AF_INET, addr2.ip, addr2.port);
+        new CheckFullConeTask(*this, endpoint1, endpoint2, [this](bool isOk) {
+            if (isOk) {
+                LOGI << "FULL CONE NAT!";
+                return;
+            }
+            checkIfSymmetricNat();
+        });
     }
 
     void checkIfSymmetricNat() {
         if (m_svrList.size() < 2) {
             LOGW << "you must specify more than TWO servers with public IP "
-                    "address for checking symmetric NAT";
+                    "address for checking SYMMETRIC NAT";
             return;
         }
-        LOGI << "check symmetric NAT";
+        LOGI << "check SYMMETRIC NAT";
         CheckSymmetricNatContext* ctx = new CheckSymmetricNatContext;
         ctx->myAddrList.reserve(m_svrList.size());
         ctx->finishedTasks = 0;
@@ -175,18 +262,44 @@ private:
                     ctx->myAddrList.emplace_back(*myAddr);
                 }
                 if (ctx->finishedTasks == m_svrList.size()) {
+                    bool isSymmetricNat = false;
                     std::map<std::string, std::set<uint16_t>> ipPorts;
                     for (const Endpoint& ep : ctx->myAddrList) {
                         std::set<uint16_t>& portSet = ipPorts[ep.ip()];
                         portSet.insert(ep.port());
                         if (portSet.size() >= 2) {
-                            LOGI << "Symmetric NAT!";
+                            LOGI << "SYMMETRIC NAT!";
+                            isSymmetricNat = true;
+                            break;
                         }
+                    }
+                    if (!isSymmetricNat) {
+                        if (ipPorts.size() > 1) {
+                            LOGI << "host has " << ipPorts.size() 
+                                 << " different IPs. SYMMETRIC NAT!";
+                            isSymmetricNat = true;
+                        }
+                    }
+                    if (!isSymmetricNat) {
+                        checkIfRestrictedConeNat();
                     }
                     delete ctx;
                 }
             });
         }
+    }
+
+    void checkIfRestrictedConeNat() {
+        LOGI << "check [PORT] RESTRICTED CORE NAT";
+        const IpPort& addr = m_svrList[0];
+        Endpoint endpoint(AF_INET, addr.ip, addr.port);
+        new CheckRestrictedConeTask(*this, endpoint, [](int natType) {
+            if (kRestrictedCone == natType) {
+                LOGI << "RESTRICTED CORE NAT!";
+            } else {
+                LOGI << "PORT RESTRICTED CORE NAT!";
+            }
+        });
     }
 };
 
@@ -243,6 +356,120 @@ void GetAddrTask::send() {
 }
 
 void GetAddrTask::stop() {
+    uv_timer_stop(&m_timer);
+    uv_close((uv_handle_t*)&m_timer, onCloseHandle);
+    m_client.m_udpSvc.removeMessageHandler(this);
+}
+
+// -----------------------------------------------------------------------------
+// Section: CheckFullConeTask implementation
+// -----------------------------------------------------------------------------
+// static
+void CheckFullConeTask::onTimeout(uv_timer_t* handle) {
+    CheckFullConeTask* self = CONTAINER_OF(handle, CheckFullConeTask, m_timer);
+    if (self->m_tryCount < kMaxChkFullConeCount) {
+        self->send();
+        self->m_tryCount += 1;
+    } else {
+        self->m_completionHandler(false);
+        self->stop();
+    }
+}
+
+// static
+void CheckFullConeTask::onCloseHandle(uv_handle_t* handle) {
+    CheckFullConeTask* self = CONTAINER_OF(handle, CheckFullConeTask, m_timer);
+    delete self;
+}
+
+CheckFullConeTask::CheckFullConeTask(Client& client, 
+                                     const Endpoint& svr, 
+                                     const Endpoint& svrUnknown, 
+                                     CompletionHandler&& handler)
+    : m_client(client), m_svr(svr), m_svrUnknown(svrUnknown), m_tryCount(0)
+    , m_completionHandler(std::move(handler)) {
+    uv_timer_init(&client.m_loop, &m_timer);
+    uv_timer_start(&m_timer, onTimeout, 0, kChkFullConeIntervalMillis);
+    m_client.m_udpSvc.addMessageHandler(this);
+}
+
+void CheckFullConeTask::handleMessage(UdpService& udpSvc, const Endpoint& peer, 
+                                      const char* data, int size) {
+    MessageId msgId = MessageId(data[0]);
+    if ( (MessageId::FULLCONE == msgId) && (peer == m_svrUnknown) ) {
+        stop();
+        m_completionHandler(true);
+    }
+}
+
+void CheckFullConeTask::send() {
+    LOGD << "send CHKFULLCONE to " << m_svr.ip() << ":" << m_svr.port();
+    char buf[1 + sizeof(struct sockaddr_in6)];
+    memset(buf, 0, sizeof(buf));
+    buf[0] = char(MessageId::CHKFULLCONE);
+    int size = m_svrUnknown.serializeToArray(
+                buf + 1, sizeof(struct sockaddr_in6));
+    m_client.m_udpSvc.send(m_svr, buf, 1 + size);
+}
+
+void CheckFullConeTask::stop() {
+    uv_timer_stop(&m_timer);
+    uv_close((uv_handle_t*)&m_timer, onCloseHandle);
+    m_client.m_udpSvc.removeMessageHandler(this);
+}
+
+// -----------------------------------------------------------------------------
+// Section: CheckRestrictedConeTask
+// -----------------------------------------------------------------------------
+// static
+void CheckRestrictedConeTask::onTimeout(uv_timer_t* handle) {
+    CheckRestrictedConeTask* self = 
+            CONTAINER_OF(handle, CheckRestrictedConeTask, m_timer);
+    if (self->m_tryCount < kMaxChkRestrictedConeCount) {
+        self->send();
+        self->m_tryCount += 1;
+    } else {
+        self->m_completionHandler(kPortRestrictedCone);
+        self->stop();
+    }
+}
+
+void CheckRestrictedConeTask::onCloseHandle(uv_handle_t* handle) {
+    CheckRestrictedConeTask* self = 
+            CONTAINER_OF(handle, CheckRestrictedConeTask, m_timer);
+    delete self;
+}
+
+CheckRestrictedConeTask::CheckRestrictedConeTask(Client& client, 
+                                                 const Endpoint& svr, 
+                                                 CompletionHandler&& handler)
+    : m_client(client), m_svr(svr), m_tryCount(0)
+    , m_completionHandler(std::move(handler)) {
+    uv_timer_init(&client.m_loop, &m_timer);
+    uv_timer_start(&m_timer, onTimeout, 0, kChkRestrictedConeIntervalMillis);
+    m_client.m_udpSvc.addMessageHandler(this);
+}
+
+
+void CheckRestrictedConeTask::handleMessage(UdpService& udpSvc, 
+                                            const Endpoint& peer, 
+                                            const char* data, 
+                                            int size) {
+    MessageId msgId = MessageId(data[0]);
+    if ( (MessageId::RESTRICTEDCONE == msgId) && (peer == m_svr) ) {
+        stop();
+        m_completionHandler(kRestrictedCone);
+    }
+}
+
+void CheckRestrictedConeTask::send() {
+    LOGD << "send CHKRESTRICTEDCONE to " << m_svr.ip() << ":" << m_svr.port();
+    char buf[1];
+    buf[0] = char(MessageId::CHKRESTRICTEDCONE);
+    m_client.m_udpSvc.send(m_svr, buf, 1);
+}
+
+void CheckRestrictedConeTask::stop() {
     uv_timer_stop(&m_timer);
     uv_close((uv_handle_t*)&m_timer, onCloseHandle);
     m_client.m_udpSvc.removeMessageHandler(this);

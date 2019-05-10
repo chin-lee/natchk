@@ -179,10 +179,22 @@ private:
             LOGE << "uv_udp_init: " << uv_strerror(retval);
             return false;
         }
+        LOGD << "bind local addr " << m_listenAddr;
         retval = uv_udp_bind(&m_udpHandle, m_listenAddr, UV_UDP_REUSEADDR);
         if (retval != 0) {
             LOGE << "uv_udp_bind: " << uv_strerror(retval);
             return false;
+        }
+        struct sockaddr_storage sa;
+        int nameLen = sizeof(struct sockaddr_storage);
+        retval = uv_udp_getsockname(&m_udpHandle, 
+                                        (struct sockaddr*)&sa, 
+                                        &nameLen);
+        if (retval == 0) {
+            Endpoint local((const struct sockaddr*)&sa);
+            LOGT << "local ip " << local.ip() << ":" << local.port();
+        } else {
+            LOGE << "uv_udp_getsockname: " << uv_strerror(retval);
         }
         return true;
     }

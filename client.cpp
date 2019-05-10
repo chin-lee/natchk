@@ -24,7 +24,7 @@ static const int kGetAddrIntervalMillis = 2000;
 static const int kMaxGetAddrCount = 5;
 
 static const int kChkFullConeIntervalMillis = 2000;
-static const int kMaxChkFullConeCount = 10;
+static const int kMaxChkFullConeCount = 5;
 
 static const int kChkRestrictedConeIntervalMillis = 2000;
 static const int kMaxChkRestrictedConeCount = 5;
@@ -157,6 +157,8 @@ public:
 
     void handleMessage(UdpService& udpSvc, const Endpoint& peer, 
                        const char* data, int size) override {
+        MessageId msgId = MessageId(data[0]);
+        LOGT << "recv message " << int(msgId) << " from " << peer;
     }
 
 private:
@@ -299,14 +301,14 @@ private:
     }
 
     void checkIfRestrictedConeNat() {
-        LOGI << "check [PORT] RESTRICTED CORE NAT";
+        LOGI << "check [PORT] RESTRICTED CONE NAT";
         const IpPort& addr = m_svrList[0];
         Endpoint endpoint(AF_INET, addr.ip, addr.port);
         new CheckRestrictedConeTask(*this, endpoint, [this](int natType) {
             if (kRestrictedCone == natType) {
-                LOGI << "RESTRICTED CORE NAT!";
+                LOGI << "RESTRICTED CONE NAT!";
             } else {
-                LOGI << "PORT RESTRICTED CORE NAT!";
+                LOGI << "PORT RESTRICTED CONE NAT!";
             }
             m_udpSvc.shutdown([](){});
         });
@@ -323,8 +325,7 @@ void GetAddrTask::onTimeout(uv_timer_t* handle) {
         self->send();
         self->m_tryCount += 1;
     } else {
-        LOGW << "failed to get address from " << self->m_svr.ip() 
-             << ":" << self->m_svr.port();
+        LOGW << "failed to get address from " << self->m_svr;
         self->m_completionHandler(nullptr);
         self->stop();
     }
@@ -351,15 +352,14 @@ void GetAddrTask::handleMessage(UdpService& udpSvc, const Endpoint& peer,
     if ( (MessageId::ADDR == msgId) && (peer == m_svr) ) {
         const struct sockaddr* sa = (const struct sockaddr*)(data + 1);
         Endpoint myAddr(sa);
-        LOGI << "recv ADDR from " << peer.ip() << ":" << peer.port() 
-             << ", my address is " << myAddr.ip() << ":" << myAddr.port();
+        LOGI << "recv ADDR from " << peer << ", my address is " << myAddr;
         m_completionHandler(&myAddr);
         stop();
     }
 }
 
 void GetAddrTask::send() {
-    LOGD << "send GETADDR to " << m_svr.ip() << ":" << m_svr.port();
+    LOGD << "send GETADDR to " << m_svr;
     char buf[1];
     buf[0] = char(MessageId::GETADDR);
     m_client.m_udpSvc.send(m_svr, buf, 1);
@@ -413,7 +413,7 @@ void CheckFullConeTask::handleMessage(UdpService& udpSvc, const Endpoint& peer,
 }
 
 void CheckFullConeTask::send() {
-    LOGD << "send CHKFULLCONE to " << m_svr.ip() << ":" << m_svr.port();
+    LOGD << "send CHKFULLCONE to " << m_svr;
     char buf[1 + sizeof(struct sockaddr_in6)];
     memset(buf, 0, sizeof(buf));
     buf[0] = char(MessageId::CHKFULLCONE);
@@ -473,7 +473,7 @@ void CheckRestrictedConeTask::handleMessage(UdpService& udpSvc,
 }
 
 void CheckRestrictedConeTask::send() {
-    LOGD << "send CHKRESTRICTEDCONE to " << m_svr.ip() << ":" << m_svr.port();
+    LOGD << "send CHKRESTRICTEDCONE to " << m_svr;
     char buf[1];
     buf[0] = char(MessageId::CHKRESTRICTEDCONE);
     m_client.m_udpSvc.send(m_svr, buf, 1);
@@ -511,16 +511,16 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if (listenAddrStr.empty()) {
-        print_opt(kOptions);
-        return 1;
-    } else if (svrAddrListStr.empty()) {
+    if (svrAddrListStr.empty()) {
         print_opt(kOptions);
         return 1;
     }
 
     IpPort listenAddr;
-    if (!util::parseIpPort(listenAddrStr, listenAddr)) {
+    if (listenAddrStr.empty()) {
+        listenAddr.ip = "0.0.0.0";
+        listenAddr.port = 0;
+    } else if (!util::parseIpPort(listenAddrStr, listenAddr)) {
         LOGE << "invalid argument " << listenAddrStr;
         return 1;
     }

@@ -3,6 +3,7 @@
 #include "util.h"
 #include "uv.h"
 #include <string>
+#include <iostream>
 #include <string.h>
 
 class Endpoint {
@@ -65,4 +66,9 @@ inline bool operator==(const Endpoint& l, const Endpoint& r) {
                             sizeof(struct sockaddr_in6) ) );
     }
     return false;
+}
+
+inline std::ostream& operator<<(std::ostream& os, const Endpoint& e) {
+    os << e.ip() << ":" << e.port();
+    return os;
 }

@@ -203,6 +203,7 @@ private:
         Endpoint endpoint(AF_INET, addr.ip, addr.port);
         new GetAddrTask(*this, endpoint, [this](const Endpoint* myAddr) {
             if (nullptr == myAddr) {
+                m_udpSvc.shutdown([](){});
                 return;
             }
             bool behindNat = true;
@@ -216,6 +217,7 @@ private:
             }
             if (!behindNat) {
                 LOGI << "host has public ip address!";
+                m_udpSvc.shutdown([](){});
             } else {
                 LOGI << "host MAY behind NAT!";
                 checkIfFullConeNat();
@@ -227,6 +229,7 @@ private:
         if (m_svrList.size() < 2) {
             LOGW << "you must specify more than TWO servers with public IP "
                     "address for checking FULL CONE NAT";
+            m_udpSvc.shutdown([](){});
             return;
         }
         LOGI << "check if FULL CONE NAT";
@@ -237,6 +240,7 @@ private:
         new CheckFullConeTask(*this, endpoint1, endpoint2, [this](bool isOk) {
             if (isOk) {
                 LOGI << "FULL CONE NAT!";
+                m_udpSvc.shutdown([](){});
                 return;
             }
             checkIfSymmetricNat();
@@ -247,6 +251,7 @@ private:
         if (m_svrList.size() < 2) {
             LOGW << "you must specify more than TWO servers with public IP "
                     "address for checking SYMMETRIC NAT";
+            m_udpSvc.shutdown([](){});
             return;
         }
         LOGI << "check SYMMETRIC NAT";
@@ -273,6 +278,9 @@ private:
                             break;
                         }
                     }
+
+                    delete ctx;
+
                     if (!isSymmetricNat) {
                         if (ipPorts.size() > 1) {
                             LOGI << "host has " << ipPorts.size() 
@@ -282,8 +290,9 @@ private:
                     }
                     if (!isSymmetricNat) {
                         checkIfRestrictedConeNat();
+                    } else {
+                        m_udpSvc.shutdown([](){});
                     }
-                    delete ctx;
                 }
             });
         }
@@ -293,12 +302,13 @@ private:
         LOGI << "check [PORT] RESTRICTED CORE NAT";
         const IpPort& addr = m_svrList[0];
         Endpoint endpoint(AF_INET, addr.ip, addr.port);
-        new CheckRestrictedConeTask(*this, endpoint, [](int natType) {
+        new CheckRestrictedConeTask(*this, endpoint, [this](int natType) {
             if (kRestrictedCone == natType) {
                 LOGI << "RESTRICTED CORE NAT!";
             } else {
                 LOGI << "PORT RESTRICTED CORE NAT!";
             }
+            m_udpSvc.shutdown([](){});
         });
     }
 };
@@ -534,8 +544,8 @@ int main(int argc, char* argv[]) {
     handler.post([&]() {
         Endpoint endpoint(AF_INET, listenAddr.ip, listenAddr.port);
         new Client(mainloop, endpoint, svrAddrList);
+        handler.shutdown([](){});
     });
-    handler.shutdown();
 
     t.join();
     uv_loop_close(&mainloop);

@@ -104,7 +104,7 @@ AsyncHandler::AsyncHandler(uv_loop_t& loop)
 AsyncHandler::~AsyncHandler() {
     if (NULL != m_pImpl) {
         // |m_pImpl| will be destroyed when uv_async_t is closed
-        m_impl.shutdown({});
+        m_impl.shutdown([](){});
     }
 }
 
